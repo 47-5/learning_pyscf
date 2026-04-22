@@ -54,44 +54,51 @@ from pyscf.lib.exceptions import BasisNotFoundError, PointGroupSymmetryError
 import warnings
 
 
-# for _atm, _bas, _env
-CHARGE_OF  = 0
-PTR_COORD  = 1
-NUC_MOD_OF = 2
-PTR_ZETA   = 3
-PTR_FRAC_CHARGE = 4
-PTR_RADIUS = 5
-ATM_SLOTS  = 6
-ATOM_OF    = 0
-ANG_OF     = 1
-NPRIM_OF   = 2
-NCTR_OF    = 3
-RADI_POWER = 3 # for ECP
-KAPPA_OF   = 4
-SO_TYPE_OF = 4 # for ECP
-PTR_EXP    = 5
-PTR_COEFF  = 6
-BAS_SLOTS  = 8
-# pointer to env
-PTR_EXPCUTOFF   = 0
-PTR_COMMON_ORIG = 1
-PTR_RINV_ORIG   = 4
-PTR_RINV_ZETA   = 7
-PTR_RANGE_OMEGA = 8
-PTR_F12_ZETA    = 9
-PTR_GTG_ZETA    = 10
-NGRIDS          = 11
-PTR_GRIDS       = 12
-AS_RINV_ORIG_ATOM = 17
-AS_ECPBAS_OFFSET = 18
-AS_NECPBAS      = 19
-PTR_ENV_START   = 20
-# parameters from libcint
-NUC_POINT = 1
-NUC_GAUSS = 2
-# nucleus with fractional charges. It can be used to mimic MM particles
-NUC_FRAC_CHARGE = 3
-NUC_ECP = 4  # atoms with pseudo potential
+# libcint 输入数组的布局说明。
+# _atm[atom_id]：每个原子一行，存原子的整数元信息。
+# _bas[shell_id]：每个壳层一行，存壳层的整数元信息。
+# _env：真正存放坐标、指数、系数等浮点数据的大数组。
+# *_OF 表示 _atm/_bas 的列号；PTR_* 表示指向 _env 的位置。
+# 注意：有些槽位会在 ECP / spinor 路径中复用。
+CHARGE_OF  = 0  # _atm 列：核电荷 Z
+PTR_COORD  = 1  # _atm 列：该原子 xyz 坐标在 _env 中的起始位置
+NUC_MOD_OF = 2  # _atm 列：核模型标记（点核 / Gaussian 核 / 分数电荷 / ECP）
+PTR_ZETA   = 3  # _atm 列：核模型 zeta 在 _env 中的位置
+PTR_FRAC_CHARGE = 4  # _atm 列：MM/分数电荷在 _env 中的位置
+PTR_RADIUS = 5  # _atm 列：预留的半径指针
+ATM_SLOTS  = 6  # _atm 每一行的槽位数
+
+ATOM_OF    = 0  # _bas 列：该壳层属于哪个原子
+ANG_OF     = 1  # _bas 列：角动量 l
+NPRIM_OF   = 2  # _bas 列：primitive Gaussian 的个数
+NCTR_OF    = 3  # _bas 列：contracted function 的个数
+RADI_POWER = 3  # _ecpbas 列：径向幂次槽位
+KAPPA_OF   = 4  # _bas 列：spinor/相对论壳层使用的 kappa 标记
+SO_TYPE_OF = 4  # _ecpbas 列：自旋轨道 ECP 类型槽位
+PTR_EXP    = 5  # _bas 列：指数 exponent 在 _env 中的起始位置
+PTR_COEFF  = 6  # _bas 列：收缩系数 coefficient 在 _env 中的起始位置
+BAS_SLOTS  = 8  # _bas 每一行的槽位数
+
+# _env 开头预留的控制槽位。
+PTR_EXPCUTOFF   = 0   # _env 槽位：libcint 的指数截断阈值
+PTR_COMMON_ORIG = 1   # _env[1:4]：诸如 r 这类算符共用的原点
+PTR_RINV_ORIG   = 4   # _env[4:7]：1/|r-R| 算符使用的原点
+PTR_RINV_ZETA   = 7   # _env 槽位：rinv 算符中 Gaussian 核模型的 zeta
+PTR_RANGE_OMEGA = 8   # _env 槽位：range-separated Coulomb 的 omega
+PTR_F12_ZETA    = 9   # _env 槽位：F12 geminal 指数
+PTR_GTG_ZETA    = 10  # _env 槽位：GTG geminal 指数
+NGRIDS          = 11  # _env 槽位：int1e_grids 中的网格点个数
+PTR_GRIDS       = 12  # _env 槽位：展开后网格坐标在 _env 中的位置
+AS_RINV_ORIG_ATOM = 17  # _env 槽位：rinv/ECP 导数辅助用到的原子编号
+AS_ECPBAS_OFFSET = 18   # _env 槽位：_ecpbas 相对 _bas 的起始偏移
+AS_NECPBAS      = 19    # _env 槽位：ECP basis 记录条数
+PTR_ENV_START   = 20    # 分子自身数据在 _env 中真正开始写入的位置
+
+# 存在 _atm[:, NUC_MOD_OF] 里的核模型枚举值。
+NUC_POINT = 1  # 点核模型
+NUC_GAUSS = 2  # 有限大小的 Gaussian 核模型
+NUC_FRAC_CHARGE = 3  # MM / 分数电荷粒子
+NUC_ECP = 4  # 使用 ECP / pseudo 描述的原子
 
 BASE = getattr(__config__, 'BASE', 0)
 NORMALIZE_GTO = getattr(__config__, 'NORMALIZE_GTO', True)
@@ -958,7 +965,9 @@ def intor_cross(intor, mol1, mol2, comp=None, grids=None):
         mat = moleintor.getints(intor+'_cart', atmc, basc, envc, shls_slice, comp, 0)
         return numpy.dot(mol1.cart2sph_coeff().T, mat)
 
-# append (charge, pointer to coordinates, nuc_mod) to _atm
+# 把一个原子的 Python 层信息打包成：
+# 1. _atm 里的一行整数记录
+# 2. _env 里的一小段浮点数据（坐标 + zeta）
 def make_atm_env(atom, ptr=0, nuclear_model=NUC_POINT, nucprop={}):
     '''Convert the internal format :attr:`Mole._atom` to the format required
     by ``libcint`` integrals
@@ -972,7 +981,9 @@ def make_atm_env(atom, ptr=0, nuclear_model=NUC_POINT, nucprop={}):
         zeta = nuclear_model(nuc_charge, nucprop)
         nuclear_model = NUC_GAUSS
 
+    # 这一段 env0 的布局固定为 [x, y, z, zeta]
     _env = numpy.hstack((atom[1], zeta))
+    # _atm 只存整数元信息，真正的浮点数都放在 _env 里
     _atm = numpy.zeros(6, dtype=numpy.int32)
     _atm[CHARGE_OF] = nuc_charge
     _atm[PTR_COORD] = ptr
@@ -980,8 +991,11 @@ def make_atm_env(atom, ptr=0, nuclear_model=NUC_POINT, nucprop={}):
     _atm[PTR_ZETA ] = ptr + 3
     return _atm, _env
 
-# append (atom, l, nprim, nctr, kappa, ptr_exp, ptr_coeff, 0) to bas
-# absorb normalization into GTO contraction coefficients
+# 把某一元素的一组 shell 打包成：
+# 1. _bas 里的若干行整数记录
+# 2. _env 里的一段浮点数据（exponent + coefficient）
+# 注意：primitive 归一化和 contracted AO 归一化都会在这里吸收到系数里。
+# 因此 _env 里存的是 libcint 直接使用的系数，而不是用户原始输入系数。
 def make_bas_env(basis_add, atom_id=0, ptr=0):
     '''Convert :attr:`Mole.basis` to the argument ``bas`` for ``libcint`` integrals
     '''
@@ -999,13 +1013,17 @@ def make_bas_env(basis_add, atom_id=0, ptr=0):
         else:
             kappa = 0
             b_coeff = numpy.array(sorted(b[1:], reverse=True))
+        # es: exponent 向量，长度为 nprim
+        # cs: coefficient 矩阵，形状为 (nprim, nctr)
         es = b_coeff[:,0]
         cs = b_coeff[:,1:]
         nprim, nctr = cs.shape
+        # 先把 primitive 归一化因子吸收到系数矩阵里
         cs = numpy.einsum('pi,p->pi', cs, gto_norm(angl, es))
         if NORMALIZE_GTO:
             cs = _nomalize_contracted_ao(angl, es, cs)
 
+        # _env 先存 exponent，再存展开后的 coefficient
         _env.append(es)
         _env.append(cs.T.reshape(-1))
         ptr_exp = ptr
@@ -1027,6 +1045,11 @@ def _nomalize_contracted_ao(l, es, cs):
     s1 = 1. / numpy.sqrt(numpy.einsum('pi,pq,qi->i', cs, ee, cs))
     return numpy.einsum('pi,i->pi', cs, s1)
 
+# 总装函数：把 atoms 和 basis 组装成整个分子的 _atm / _bas / _env。
+# 可以把它理解成：
+# atoms --make_atm_env--> 原子记录
+# basis --make_bas_env--> 壳层模板
+# 最后再把壳层模板分配到每个具体原子上
 def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
     '''Generate the input arguments for ``libcint`` library based on internal
     format :attr:`Mole._atom` and :attr:`Mole._basis`
@@ -1036,6 +1059,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
     _env = [pre_env]
     ptr_env = len(pre_env)
 
+    # 先处理所有原子：为每个原子生成一行 _atm 和一小段 _env
     for ia, atom in enumerate(atoms):
         symb = atom[0]
         stdsymb = _rm_digit(symb)
@@ -1064,6 +1088,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
         _atm.append(atm0)
         _env.append(env0)
 
+    # 接着按元素构造 basis 模板；同一种元素的 exponent / coeff 只存一份
     _basdic = {}
     for symb, basis_add in basis.items():
         bas0, env0 = make_bas_env(basis_add, 0, ptr_env)
@@ -1071,6 +1096,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
         _basdic[symb] = bas0
         _env.append(env0)
 
+    # 最后把 basis 模板分配给每个具体原子，并把 ATOM_OF 改成真实原子编号
     for ia, atom in enumerate(atoms):
         symb = atom[0]
         puresymb = _rm_digit(symb)
@@ -1094,6 +1120,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
         b[:,ATOM_OF] = ia
         _bas.append(b)
 
+    # 把中间收集到的列表真正堆叠成 libcint 需要的 numpy 数组
     if _atm:
         _atm = numpy.asarray(numpy.vstack(_atm), numpy.int32).reshape(-1, ATM_SLOTS)
     else:
