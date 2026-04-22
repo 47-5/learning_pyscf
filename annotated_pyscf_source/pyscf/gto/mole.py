@@ -325,14 +325,14 @@ def format_atom(atoms, origin=0, axes=None,
     If the :attr:`~Mole.atom` is a string, it takes ";" and "\\n"
     for the mark to separate atoms;  "," and arbitrary length of blank space
     to separate the individual terms for an atom.  Blank line will be ignored.
-
+    LRC NOTE: 关于字符怎么输入，这里会把分号;和换行\\n当作原子的分隔，而逗号和任意长度的空格作为每个原子内部的信息的分割符，空行将被忽略
     Args:
         atoms : list or str
             the same to :attr:`Mole.atom`
 
     Kwargs:
         origin : ndarray
-            new axis origin.
+            new axis origin.新的坐标系的原点，你本来输入的坐标默认的原点的（0，0，0），如果这里不是（0，0，0）就会对坐标做一个平移
         axes : ndarray
             (new_x, new_y, new_z), new coordinates
         unit : str or number
@@ -358,6 +358,7 @@ def format_atom(atoms, origin=0, axes=None,
     [['F', [-1.0, -1.0, -1.0]], ['H', [-1, -1, 0]]]
     '''
     def str2atm(line):
+        # LRC NOTE: 简单的把一个字符串分割，第0个是元素，第1-3是坐标
         dat = line.split()
         try:
             coords = [float(x) for x in dat[1:4]]
@@ -408,9 +409,9 @@ def format_atom(atoms, origin=0, axes=None,
     if axes is None:
         axes = numpy.eye(3)
 
-    unit = _length_in_au(unit)
+    unit = _length_in_au(unit)  # LRC NOTE: 获取当前单位转化为a.u.的转换因子
     c = numpy.array([a[1] for a in fmt_atoms], dtype=numpy.double)
-    c = numpy.einsum('ix,kx->ki', axes * unit, c - origin)
+    c = numpy.einsum('ix,kx->ki', axes * unit, c - origin)  # LRC NOTE: c - origin是平移，然后通过点乘把坐标投影到新的坐标轴上
     z = [a[0] for a in fmt_atoms]
     return list(zip(z, c.tolist()))
 
@@ -2380,7 +2381,7 @@ class MoleBase(lib.StreamObject):
     @property
     def nelec(self):
         ne = self.nelectron
-        nalpha = (ne + self.spin) // 2
+        nalpha = (ne + self.spin) // 2   # LRC NOTE: 因为spin == alpha - beta  而  nelectron = alpha + beta
         nbeta = nalpha - self.spin
         assert (nalpha >= 0 and nbeta >= 0)
         if nalpha + nbeta != ne:
@@ -2397,7 +2398,7 @@ class MoleBase(lib.StreamObject):
     @property
     def nelectron(self):
         if self._nelectron is None:
-            return self.tot_electrons()
+            return self.tot_electrons()  # LRC NOTE: 此函数获取给定Mole对象的总电子数
         else:
             return self._nelectron
     @nelectron.setter
@@ -2476,6 +2477,7 @@ class MoleBase(lib.StreamObject):
         '''Setup molecule and initialize some control parameters.  Whenever you
         change the value of the attributes of :class:`Mole`, you need call
         this function to refresh the internal data of Mole.
+        LRC NOTE: 这很关键，如果你通过对Mole对象的属性赋值，你必须再次调用build()以使之生效
 
         Kwargs:
             dump_input : bool
@@ -2545,7 +2547,7 @@ class MoleBase(lib.StreamObject):
                     print('output file: %s' % self.output)
 
             if self.output == '/dev/null':
-                self.stdout = open(os.devnull, 'w', encoding='utf-8')
+                self.stdout = open(os.devnull, 'w', encoding='utf-8')  # LRC NOTE: os.devnull 是 Python os 模块中的一个常量，用于表示操作系统的空设备路径。它的主要作用是将输出重定向到空设备，从而丢弃不需要的输出信息
             else:
                 self.stdout = open(self.output, 'w', encoding='utf-8')
 
@@ -2553,13 +2555,18 @@ class MoleBase(lib.StreamObject):
             self._atom = self.format_atom(self.atom, unit=self.unit)
         uniq_atoms = {a[0] for a in self._atom}
 
+        # LRC NOTE: ecp、pseudo和basis都用了_parse_default_basis，难道他们是相同格式？其实不是
+        # LRC NOTE: _parse_default_basis does not parse basis/ECP/pseudo data itself.
+        # LRC NOTE: It only expands a global/default specification into {atom: spec}.
+        # LRC NOTE: basis, ecp, and pseudo share this outer per-atom dispatch pattern.
+        # LRC NOTE: Their actual internal formats diverge in format_basis/format_ecp/format_pseudo.
         if self.basis:
             _basis = _parse_default_basis(self.basis, uniq_atoms)
             self._basis = self.format_basis(_basis)
         env = self._env[:PTR_ENV_START]
         self._atm, self._bas, self._env = \
                 self.make_env(self._atom, self._basis, env, self.nucmod,
-                              self.nucprop)
+                              self.nucprop)  # LRC todo: 现在看self.nucprop好像还是个空字典
 
         if self.pseudo:
             self.ecp, self.pseudo = classify_ecp_pseudo(self, self.ecp, self.pseudo)
@@ -2573,13 +2580,13 @@ class MoleBase(lib.StreamObject):
                 self._atm, self._ecpbas, self._env = \
                         self.make_ecp_env(self._atm, self._ecp, self._env)
 
-        if self.pseudo:
+        if self.pseudo:  # LRC NOTE: 这么看有效核势和赝势不是一码事啊？是的ECP往往是量子化学用的，而赝势往往是PBC/GTH
             # Unless explicitly input, PP should not be assigned to ghost atoms
             atoms_wo_ghost = [a for a in uniq_atoms if not is_ghost_atom(a)]
             _pseudo = _parse_default_basis(self.pseudo, atoms_wo_ghost)
             self._pseudo = _pseudo = self.format_pseudo(_pseudo)
             if _pseudo:
-                conflicts = set(_pseudo).intersection(self._ecp)
+                conflicts = set(_pseudo).intersection(self._ecp)  # LRC NOTE: .intersection是取交集
                 if conflicts:
                     raise RuntimeError('Pseudo potential for atoms %s are defined '
                                        'in both .ecp and .pseudo.' % list(conflicts))
@@ -2589,14 +2596,14 @@ class MoleBase(lib.StreamObject):
                     if (symb in _pseudo and
                         # skip ghost atoms
                         self._atm[ia,0] != 0):
-                        self._atm[ia,0] = sum(_pseudo[symb][0])
+                        self._atm[ia,0] = sum(_pseudo[symb][0])  # LRC NOTE: _atm的形状是[[charge, ptr-of-coord, nuc-model, ptr-zeta, 0, 0], [...]]，也就是说，用了赝势之后就把哪个原子的charge设为todo（根据赝势来看）
 
         if self.spin is None:
             self.spin = self.nelectron % 2
         else:
             # Access self.nelec in which the code checks whether the spin and
             # number of electrons are consistent.
-            self.nelec
+            self.nelec  # LRC NOTE: 这是什么？其他地方没出现啊？其实是有一个def nelec(self):被@property装饰了。这个函数返回nalpha, nbeta
 
         # reset nuclear energy
         self.enuc = None
@@ -2608,7 +2615,7 @@ class MoleBase(lib.StreamObject):
             self.magmom = [0,] * self.natm
         elif isinstance(self.magmom, np.ndarray):
             self.magmom = self.magmom.tolist()
-        if self.spin == 0 and abs(numpy.sum(self.magmom) - self.spin) > 1e-6:
+        if self.spin == 0 and abs(numpy.sum(self.magmom) - self.spin) > 1e-6:  # LRC todo: 这有什么物理含义？
             #don't check for unrestricted calcs.
             raise ValueError("mol.magmom is set incorrectly.")
 
