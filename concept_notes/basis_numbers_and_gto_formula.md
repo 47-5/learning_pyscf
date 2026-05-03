@@ -93,7 +93,7 @@ $$
 | d | 2 | 5 | 6 |
 | f | 3 | 7 | 10 |
 
-这就是为什么同样写一个 d shell，有些程序会讨论 5D/6D，有些会讨论 spherical/cartesian。
+这就是为什么同样写一个 d shell，有些程序会讨论 5D/6D，有些会讨论 spherical/cartesian。Gaussian默认是笛卡尔型，ORCA是球谐型，所以如果要让这两个程序的结果比对时，Gaussian应额外加关键词5d
 
 ## 4. contraction: 基组文件中的 coefficient 是什么
 
@@ -199,7 +199,7 @@ $$
 
 这里最重要的观察是：同一个径向收缩系数 $c_q$ 同时作用在三个角向分量上。换句话说，p shell 的 contraction 不是分别给 $p_x,p_y,p_z$ 三套不同的 coefficient，而是同一组 coefficient 乘上一个三维角向向量。
 
-为了和后面的矩阵 $\mathbf B$ 无缝衔接，可以把每个 primitive p shell 也写成一个三维列向量：
+为了和后面的矩阵语言无缝衔接，可以把每个 primitive p shell 也写成一个三维列向量：
 
 $$
 \mathbf b_q^{A,p}(\mathbf r)
@@ -215,55 +215,74 @@ $$
 
 所以 $\mathbf b_1,\mathbf b_2,\cdots,\mathbf b_M$ 的下标表示第几个 primitive Gaussian，而不是 $p_x,p_y,p_z$。每一个 $\mathbf b_q$ 本身都是一个三维列向量，已经包含三个方向。
 
-于是单个 contraction 就是：
+把这些列向量并排放在一起，可以定义一个 primitive p-shell matrix：
 
 $$
-\boldsymbol\chi_{p}^{A}(\mathbf r)
+\mathcal B_p^A(\mathbf r)
 =
-\mathcal N^{\mathrm{contr}}
 \begin{bmatrix}
 \mathbf b_1^{A,p}(\mathbf r) &
 \mathbf b_2^{A,p}(\mathbf r) &
 \cdots &
 \mathbf b_M^{A,p}(\mathbf r)
 \end{bmatrix}
+\in \mathbb R^{3\times M}
+$$
+
+这里 $M=n_{\mathrm{prim}}$，也就是 primitive Gaussian 的个数。
+
+于是单个 contraction 可以写成：
+
+$$
+\boldsymbol\chi_{p}^{A}(\mathbf r)
+=
+\mathcal N^{\mathrm{contr}}\,\mathcal B_p^A(\mathbf r)\,\mathbf c
+$$
+
+其中
+
+$$
+\mathbf c
+=
 \begin{bmatrix}
 c_1 \\
 c_2 \\
 \vdots \\
 c_M
 \end{bmatrix}
+\in \mathbb R^{M\times 1},
+\qquad
+\boldsymbol\chi_{p}^{A}(\mathbf r)\in \mathbb R^{3\times 1}
 $$
 
-这里中间那个矩阵的形状是 $3\times M$：行对应 $p_x,p_y,p_z$ 三个角向分量（当前是以p壳层为例），列对应不同 primitive exponent。右边的 coefficient vector 形状是 $M\times 1$，乘出来就是 $3\times 1$ 的 contracted p shell 向量。
+也就是说，单个 contracted p shell 是一个三维列向量；它有三个分量，分别对应 $p_x,p_y,p_z$。
 
-如果有多个 contraction，也就是 coefficient 有多列，那么只要把右边的系数列向量换成 coefficient matrix：
+如果有多个 contraction，也就是 coefficient 有多列，那么右边的系数列向量就会变成一个 coefficient matrix：
 
 $$
-\boldsymbol\chi_{p}^{A}(\mathbf r)
+\mathbf X_{p}^{A}(\mathbf r)
 =
-\begin{bmatrix}
-\mathbf b_1^{A,p}(\mathbf r) &
-\mathbf b_2^{A,p}(\mathbf r) &
-\cdots &
-\mathbf b_M^{A,p}(\mathbf r)
-\end{bmatrix}
-\mathbf C
+\mathcal B_p^A(\mathbf r)\,\mathbf C
 $$
 
 其中
 
 $$
-\boldsymbol\chi_{p}^{A}(\mathbf r)
-\in \mathbb R^{3\times n_{\mathrm{ctr}}},
+\mathcal B_p^A(\mathbf r)
+\in \mathbb R^{3\times M},
 \qquad
-\mathbf C\in \mathbb R^{M\times n_{\mathrm{ctr}}}
+\mathbf C\in \mathbb R^{M\times n_{\mathrm{ctr}}},
+\qquad
+\mathbf X_{p}^{A}(\mathbf r)
+\in \mathbb R^{3\times n_{\mathrm{ctr}}}
 $$
 
-结果矩阵的每一列是一组 contracted p shell：
+这里 $\mathbf X_p^A(\mathbf r)$ 表示“所有 contracted p shell 并排组成的矩阵”。结果矩阵的每一列是一组 contracted p shell：
 
 $$
-\boldsymbol\chi_{p}^{A}[:,k]
+\boldsymbol\chi_{p,k}^{A}(\mathbf r)
+=
+\mathbf X_{p}^{A}(\mathbf r)[:,k]
 =
 \begin{bmatrix}
 \chi_{k,p_x}^{A} \\
@@ -272,10 +291,17 @@ $$
 \end{bmatrix}
 $$
 
+因此需要严格区分两个不同对象：
+
+- $\mathcal B_p^A(\mathbf r)$ 是 primitive p-shell matrix，形状是 $3\times M$
+- $\mathbf X_p^A(\mathbf r)$ 是 contracted p-shell matrix，形状是 $3\times n_{\mathrm{ctr}}$
+
+前者的列数由 primitive 个数决定，后者的列数由 contraction 个数决定。
+
 一般化到任意角动量 $l$，可以记成：
 
 $$
-\boldsymbol\chi_l^A(\mathbf r)
+\mathbf X_l^A(\mathbf r)
 = \mathcal B_l^A(\mathbf r)\mathbf C
 $$
 
@@ -285,7 +311,7 @@ $$
 \mathcal B_l^A(\mathbf r)
 \in \mathbb R^{d_l\times n_{\mathrm{prim}}},
 \qquad
-\boldsymbol\chi_l^A(\mathbf r)
+\mathbf X_l^A(\mathbf r)
 \in \mathbb R^{d_l\times n_{\mathrm{ctr}}}
 $$
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 # Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -972,7 +973,7 @@ def make_atm_env(atom, ptr=0, nuclear_model=NUC_POINT, nucprop={}):
     '''Convert the internal format :attr:`Mole._atom` to the format required
     by ``libcint`` integrals
     '''
-    nuc_charge = charge(atom[0])
+    nuc_charge = charge(atom[0])  # LRC NOTE: atom的格式可以看format_atom函数
     if nuclear_model == NUC_POINT:
         zeta = 0
     elif nuclear_model == NUC_GAUSS:
@@ -996,6 +997,19 @@ def make_atm_env(atom, ptr=0, nuclear_model=NUC_POINT, nucprop={}):
 # 2. _env 里的一段浮点数据（exponent + coefficient）
 # 注意：primitive 归一化和 contracted AO 归一化都会在这里吸收到系数里。
 # 因此 _env 里存的是 libcint 直接使用的系数，而不是用户原始输入系数。
+#
+# basis_add 不是整个 basis 字典，而是其中“某一个元素/原子标签对应的 value”。
+# 它通常来自 self._basis（也就是 format_basis 之后的结果）里的某一项，例如：
+# self._basis = {
+#     'H': [[0, [3.425..., 0.154...], [0.623..., 0.535...], ...]],
+#     'O': [[0, ...], [0, ...], [1, ...], ...]
+# }
+# 那么 make_env 里遍历到 for symb, basis_add in basis.items() 时：
+# - symb 可能是 'H' 或 'O'
+# - basis_add 就是 self._basis['H'] 或 self._basis['O'] 这一整组 shell 列表
+#
+# 换句话说，make_bas_env 的输入已经不是用户最初写的 'sto-3g' 这种字符串，
+# 而是 format_basis 之后的内部 shell 表示。
 def make_bas_env(basis_add, atom_id=0, ptr=0):
     '''Convert :attr:`Mole.basis` to the argument ``bas`` for ``libcint`` integrals
     '''
@@ -1025,7 +1039,7 @@ def make_bas_env(basis_add, atom_id=0, ptr=0):
 
         # _env 先存 exponent，再存展开后的 coefficient
         _env.append(es)
-        _env.append(cs.T.reshape(-1))
+        _env.append(cs.T.reshape(-1))  # LRC NOTE: 把 coefficient 矩阵按 contraction 为单位展平成一维，再塞进 _env。
         ptr_exp = ptr
         ptr_coeff = ptr_exp + nprim
         ptr = ptr_coeff + nprim * nctr
@@ -1053,6 +1067,7 @@ def _nomalize_contracted_ao(l, es, cs):
 def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
     '''Generate the input arguments for ``libcint`` library based on internal
     format :attr:`Mole._atom` and :attr:`Mole._basis`
+    LRC NOTE: 这里atoms和basis都已经是pyscf的内部格式了
     '''
     _atm = []
     _bas = []
@@ -1064,14 +1079,14 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
         symb = atom[0]
         stdsymb = _rm_digit(symb)
 
-        if ia+1 in nucprop:
+        if ia+1 in nucprop:  # LRC NOTE: 这一块是处理核的性质信息
             prop = nucprop[ia+1]
         elif symb in nucprop:
             prop = nucprop[symb]
         else:
             prop = nucprop.get(stdsymb, {})
 
-        nuclear_model = NUC_POINT
+        nuclear_model = NUC_POINT  # LRC NOTE: 这一块处理核的模型
         if nucmod:
             if nucmod is None:
                 nuclear_model = NUC_POINT
@@ -1083,15 +1098,20 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
                 nuclear_model = _parse_nuc_mod(nucmod[symb])
             elif stdsymb in nucmod:
                 nuclear_model = _parse_nuc_mod(nucmod[stdsymb])
-        atm0, env0 = make_atm_env(atom, ptr_env, nuclear_model, prop)
+        atm0, env0 = make_atm_env(atom, ptr_env, nuclear_model, prop)  # atom0是形状为（6，）的向量， env0是[x, y, z, zeta]的向量
         ptr_env = ptr_env + len(env0)
         _atm.append(atm0)
         _env.append(env0)
 
     # 接着按元素构造 basis 模板；同一种元素的 exponent / coeff 只存一份
+    # 这里的 basis 就是 self._basis，通常来自：
+    # self._basis = self.format_basis(_parse_default_basis(self.basis, uniq_atoms))
+    # 因此遍历到的 basis_add 是某一个元素/标签对应的“shell 列表”，而不是整个 dict。
     _basdic = {}
     for symb, basis_add in basis.items():
-        bas0, env0 = make_bas_env(basis_add, 0, ptr_env)
+        # 例如：symb='O' 时，basis_add 大致像 [[0, ...], [0, ...], [1, ...], ...]
+        # 也就是 format_basis 之后 O 原子对应的所有 shell。
+        bas0, env0 = make_bas_env(basis_add, 0, ptr_env)  # LRC NOTE: 这里先故意把atoms_id都设为0作为模板，之后再用实际值覆盖（这么做的原因是基组定义是按元素，而实际计算时应该给每个原子都分配对应的基组）
         ptr_env = ptr_env + len(env0)
         _basdic[symb] = bas0
         _env.append(env0)
@@ -1099,17 +1119,17 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
     # 最后把 basis 模板分配给每个具体原子，并把 ATOM_OF 改成真实原子编号
     for ia, atom in enumerate(atoms):
         symb = atom[0]
-        puresymb = _rm_digit(symb)
+        puresymb = _rm_digit(symb)  # 去掉标签里的数字后缀，比如：'H1' -> 'H'
         if symb in _basdic:
             b = _basdic[symb].copy()
         elif puresymb in _basdic:
             b = _basdic[puresymb].copy()
-        else:
+        else: # LRC NOTE: 开始处理鬼原子
             if symb[:2].upper() == 'X-':
-                symb = symb[2:]
+                symb = symb[2:]  # LRC NOTE: 取元素时就把对应的前缀去掉
             elif symb[:6].upper() == 'GHOST-':
                 symb = symb[6:]
-            puresymb = _rm_digit(symb)
+            puresymb = _rm_digit(symb)  # LRC NOTE: 又是去掉标签里的数字后缀
             if symb in _basdic:
                 b = _basdic[symb].copy()
             elif puresymb in _basdic:
@@ -1117,7 +1137,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
             else:
                 sys.stderr.write('Warning: Basis not found for atom %d %s\n' % (ia, symb))
                 continue
-        b[:,ATOM_OF] = ia
+        b[:,ATOM_OF] = ia  # LRC NOTE: 会把所有行的第一列都改成 ia(即原子索引)。而这个b就是前面循环使用make_bas_env给每个元素创建的模板
         _bas.append(b)
 
     # 把中间收集到的列表真正堆叠成 libcint 需要的 numpy 数组
@@ -1187,6 +1207,9 @@ def make_ecp_env(mol, _atm, ecp, pre_env=[]):
         _env = pre_env
     return _atm, _ecpbas, _env
 
+# LRC NOTE: 计算分子的总电子数。主公式是：nelectron = 核电荷总和 - 分子净电荷 charge。
+# 如果 _atm 已经构建好，就从 _atm/_env 读核电荷；否则从 _atom 或原始 atom 输入计算。
+# ECP/pseudo 修改有效核电荷时，前面的构建过程也会影响这里看到的 atom_charges()。
 def tot_electrons(mol):
     '''Total number of electrons for the given molecule
 
@@ -1200,11 +1223,15 @@ def tot_electrons(mol):
     6
     '''
     if mol._atm.size != 0:
+        # Mole 已经 build 过时，从 _atm 中读当前有效核电荷。
         nelectron = mol.atom_charges().sum()
     elif mol._atom:
+        # _atom 已经由 format_atom 得到，但 _atm 还没生成时，从元素符号查核电荷。
         nelectron = sum(charge(a[0]) for a in mol._atom)
     else:
+        # 连 _atom 都还没有时，临时解析用户输入的 mol.atom。
         nelectron = sum(charge(a[0]) for a in format_atom(mol.atom))
+    # 分子带正电会减少电子数，带负电会增加电子数。
     nelectron -= mol.charge
     nelectron_int = int(round(nelectron))
 
@@ -1404,7 +1431,9 @@ def npgto_nr(mol, cart=None):
     else:
         return int(((l*2+1) * mol._bas[:,NPRIM_OF]).sum())
 def nao_nr(mol, cart=None):
-    '''Total number of contracted GTOs for the given :class:`Mole` object'''
+    '''Total number of contracted GTOs for the given :class:`Mole` object
+    LRC NOTE: 球谐用的
+    '''
     if cart is None:
         cart = mol.cart
     if cart:
@@ -1412,7 +1441,9 @@ def nao_nr(mol, cart=None):
     else:
         return int(((mol._bas[:,ANG_OF]*2+1) * mol._bas[:,NCTR_OF]).sum())
 def nao_cart(mol):
-    '''Total number of contracted cartesian GTOs for the given :class:`Mole` object'''
+    '''Total number of contracted cartesian GTOs for the given :class:`Mole` object
+    LRC NOTE: 笛卡尔用的
+    '''
     l = mol._bas[:,ANG_OF]
     return int(((l+1)*(l+2)//2 * mol._bas[:,NCTR_OF]).sum())
 
@@ -2343,7 +2374,10 @@ class MoleBase(lib.StreamObject):
 
     # Using cartesian GTO (6d,10f,15g)
     cart = getattr(__config__, 'gto_mole_Mole_cart', False)
+    # charge 决定总电子数：nelectron = 核电荷总和 - charge
     charge = 0
+    # PySCF 的 spin 不是多重度 multiplicity，而是 Nalpha - Nbeta = 2S。
+    # 例如 singlet: spin=0, multiplicity=1；doublet: spin=1, multiplicity=2；triplet: spin=2, multiplicity=3。
     spin = 0 # 2j == nelec_alpha - nelec_beta
     symmetry = False
     symmetry_subgroup = None
@@ -2405,12 +2439,23 @@ class MoleBase(lib.StreamObject):
     def nbas(self):
         return len(self._bas)
 
+    # LRC NOTE: nelec 是 @property，不是普通属性。访问 self.nelec 时会执行这个 getter。
+    # 它返回的是 (Nalpha, Nbeta)，同时还承担一个很重要的校验职责：
+    # 检查总电子数 nelectron 和 spin 是否能对应到整数个 alpha/beta 电子。
     @property
     def nelec(self):
+        # self.nelectron 也是 property：优先使用用户显式设置的 _nelectron；否则现算总电子数。
         ne = self.nelectron
-        nalpha = (ne + self.spin) // 2   # LRC NOTE: 因为spin == alpha - beta  而  nelectron = alpha + beta
+        # PySCF 定义 spin = Nalpha - Nbeta，同时 nelectron = Nalpha + Nbeta。
+        # 联立两式可得 Nalpha = (nelectron + spin) / 2。
+        # 这里先用 // 做整数除法，后面再用 nalpha + nbeta != ne 检查奇偶性是否自洽。
+        nalpha = (ne + self.spin) // 2
         nbeta = nalpha - self.spin
+        # 如果 spin 太大，可能导致某一类电子数为负数，这是物理上不允许的。
         assert (nalpha >= 0 and nbeta >= 0)
+        # 若 nelectron 和 spin 奇偶性不匹配，整数除法会“截断”半个电子。
+        # 例如 ne=10, spin=1 时理论上 Nalpha=5.5, Nbeta=4.5，不可能成立。
+        # 这时 nalpha + nbeta 会不等于 ne，于是抛出更清楚的错误。
         if nalpha + nbeta != ne:
             raise RuntimeError('Electron number %d and spin %d are not consistent\n'
                                'Note mol.spin = 2S = Nalpha - Nbeta, not 2S+1' %
@@ -2418,25 +2463,33 @@ class MoleBase(lib.StreamObject):
         return nalpha, nbeta
     @nelec.setter
     def nelec(self, neleca_nelecb):
+        # 允许用户反过来用 (Nalpha, Nbeta) 设置电子数和 spin。
+        # 例如 mol.nelec = (5, 5) 会设置 _nelectron=10, spin=0。
         neleca, nelecb = neleca_nelecb
         self._nelectron = neleca + nelecb
         self.spin = neleca - nelecb
 
     @property
     def nelectron(self):
+        # _nelectron 是缓存/覆盖值。如果用户没有显式设置 nelectron/nelec，
+        # 就根据原子核电荷和分子净电荷现算：sum(Z) - charge。
         if self._nelectron is None:
             return self.tot_electrons()  # LRC NOTE: 此函数获取给定Mole对象的总电子数
         else:
             return self._nelectron
     @nelectron.setter
     def nelectron(self, n):
+        # 显式指定总电子数。设置后 nelectron getter 会优先返回这个值，而不是重新计算。
         self._nelectron = n
 
     @property
     def multiplicity(self):
+        # 化学中常说的多重度是 2S+1；PySCF 的 spin 是 2S。
+        # 因此 multiplicity = spin + 1。
         return self.spin + 1
     @multiplicity.setter
     def multiplicity(self, x):
+        # 允许用户用多重度设置 spin。x=None 表示暂不指定，让 build() 后面自动猜。
         if x is None:
             self.spin = None
         else:
@@ -2445,6 +2498,8 @@ class MoleBase(lib.StreamObject):
     @property
     def ms(self):
         '''Spin quantum number. multiplicity = ms*2+1'''
+        # ms 这里对应总自旋量子数 S；因为 spin = 2S，所以 ms = spin / 2。
+        # 偶数 spin 返回整数，奇数 spin 返回半整数，例如 spin=1 -> ms=0.5。
         if self.spin % 2 == 0:
             return self.spin // 2
         else:
@@ -2553,6 +2608,9 @@ class MoleBase(lib.StreamObject):
         if ecp is not None: self.ecp = ecp
         if pseudo is not None: self.pseudo = pseudo
         if charge is not None: self.charge = charge
+        # build() 的 spin 参数默认是 0。只有传入非 0 或 None 时，才覆盖 self.spin。
+        # 例如 build(spin=2) 指定 triplet；build(spin=None) 表示让后面按电子数奇偶性自动猜 spin。
+        # 注意：PySCF 里的 spin = Nalpha - Nbeta，不是 Gaussian/ORCA 输入里的 multiplicity。
         if spin != 0: self.spin = spin
         if symmetry is not None: self.symmetry = symmetry
         if symmetry_subgroup is not None: self.symmetry_subgroup = symmetry_subgroup
@@ -2625,12 +2683,19 @@ class MoleBase(lib.StreamObject):
                         self._atm[ia,0] != 0):
                         self._atm[ia,0] = sum(_pseudo[symb][0])  # LRC NOTE: _atm的形状是[[charge, ptr-of-coord, nuc-model, ptr-zeta, 0, 0], [...]]，也就是说，用了赝势之后就把哪个原子的charge设为todo（根据赝势来看）
 
+        # 到这里 _atm 已经构建好；如果用户没有显式覆盖 _nelectron，self.nelectron
+        # 可以通过 atom_charges() 和 charge 算出总电子数。
         if self.spin is None:
+            # 用户用 spin=None 或 multiplicity=None 表示“请自动猜自旋”。
+            # 这里按电子数奇偶性给出最小合理值：偶数电子 -> spin=0；奇数电子 -> spin=1。
             self.spin = self.nelectron % 2
         else:
-            # Access self.nelec in which the code checks whether the spin and
-            # number of electrons are consistent.
-            self.nelec  # LRC NOTE: 这是什么？其他地方没出现啊？其实是有一个def nelec(self):被@property装饰了。这个函数返回nalpha, nbeta
+            # 这一行看起来像“空访问”，但它是故意的：self.nelec 是 @property。
+            # 访问 self.nelec 会触发 getter，计算 (Nalpha, Nbeta)，并检查：
+            # 1. Nalpha/Nbeta 是否非负
+            # 2. nelectron 和 spin 的奇偶性是否一致
+            # 如果不一致，nelec getter 会在这里抛出 RuntimeError。
+            self.nelec
 
         # reset nuclear energy
         self.enuc = None
@@ -2642,7 +2707,7 @@ class MoleBase(lib.StreamObject):
             self.magmom = [0,] * self.natm
         elif isinstance(self.magmom, np.ndarray):
             self.magmom = self.magmom.tolist()
-        if self.spin == 0 and abs(numpy.sum(self.magmom) - self.spin) > 1e-6:  # LRC todo: 这有什么物理含义？
+        if self.spin == 0 and abs(numpy.sum(self.magmom) - self.spin) > 1e-6:
             #don't check for unrestricted calcs.
             raise ValueError("mol.magmom is set incorrectly.")
 
@@ -3287,7 +3352,7 @@ class MoleBase(lib.StreamObject):
     def atom_coords(self, unit='Bohr'):
         '''np.asarray([mol.atom_coord(i) for i in range(mol.natm)])'''
         ptr = self._atm[:,PTR_COORD]
-        c = self._env[ptr[:,None] + np.arange(3)]
+        c = self._env[ptr[:,None] + np.arange(3)]  # LRC NOTE: 充分利用广播机制
         if not is_au(unit):
             c *= 1./_length_in_au(unit)
         return c
@@ -3466,7 +3531,7 @@ class MoleBase(lib.StreamObject):
         l = self.bas_angular(bas_id)
         es = self.bas_exp(bas_id)
         cs = self._libcint_ctr_coeff(bas_id)
-        cs = numpy.einsum('pi,p->pi', cs, 1/gto_norm(l, es))
+        cs = numpy.einsum('pi,p->pi', cs, 1/gto_norm(l, es))  # 又把每个原GTO的归一化系数去掉了，但是还保留了收缩基函数的归一化系数
         return cs
 
     def bas_len_spinor(self, bas_id):
